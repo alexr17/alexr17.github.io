@@ -1,11 +1,22 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --bg: #ffffff;
   --text: #1b1b1b;
   --muted: #666666;
   --line: #dddddd;
   --link: #0645ad;
   --link-visited: #5a2ca0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #242424;
+    --text: #f3f0e8;
+    --muted: #bdb8ad;
+    --line: #46433d;
+    --link: #a9c7ff;
+    --link-visited: #d5b8ff;
+  }
 }
 
 * {
