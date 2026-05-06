@@ -1,0 +1,139 @@
+:root {
+  color-scheme: light;
+  --bg: #ffffff;
+  --text: #1b1b1b;
+  --muted: #666666;
+  --line: #dddddd;
+  --link: #0645ad;
+  --link-visited: #5a2ca0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 18px;
+}
+
+body {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 48px 24px 36px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  line-height: 1.55;
+}
+
+a {
+  color: var(--link);
+  text-underline-offset: 0.14em;
+}
+
+a:visited {
+  color: var(--link-visited);
+}
+
+a:hover,
+a:focus {
+  text-decoration-thickness: 0.12em;
+}
+
+.site-header {
+  margin-bottom: 44px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+h1,
+h2 {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.2;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+h2 {
+  margin: 42px 0 12px;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.9rem;
+}
+
+p {
+  margin: 0 0 1rem;
+}
+
+.intro {
+  font-size: 1.08rem;
+}
+
+.item-list,
+.dated-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.item-list li,
+.dated-list li {
+  margin: 0 0 0.7rem;
+}
+
+.item-list a {
+  font-weight: 700;
+}
+
+.meta {
+  display: block;
+  color: var(--muted);
+}
+
+.dated-list li {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr;
+  gap: 1rem;
+}
+
+time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+footer {
+  margin-top: 56px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 520px) {
+  html {
+    font-size: 17px;
+  }
+
+  body {
+    padding: 32px 18px 28px;
+  }
+
+  .dated-list li {
+    display: block;
+  }
+
+  time {
+    display: block;
+  }
+}
