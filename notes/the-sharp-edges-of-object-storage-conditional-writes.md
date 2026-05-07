@@ -76,8 +76,6 @@ The Hudi fix was to disable retries in the storage lock clients, captured in [ap
 
 Turning off lower-level retries meant that more transient object-store failures reached the lock code paths directly. It also made provider limits harder to ignore. GCS documents a maximum write rate of [one write per second to the same object name](https://cloud.google.com/storage/quotas), which matters a lot for single-object designs. A lock file is intentionally a hot object. That is the whole point. But object stores are usually optimized for high aggregate throughput across keys, not rapid mutation of one key.
 
-Note, that in instances of something like this, where a retry makes it through the SDK after a successful write, it can also be a symptom of another issue: networking, S3 losing one of its many 9s. However, you must engineer for these scenarios to maintain correctness.
-
 ## Recovering From Ambiguous Writes
 
 The retry ambiguity is not unique to Hudi's single-lock-file design. Epochs and fencing tokens help with stale owners, and they can make recovery from an ambiguous write more structured, but they do not make a conditional write magically idempotent.
