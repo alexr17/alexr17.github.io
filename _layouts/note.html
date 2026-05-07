@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page.title | escape }} | {{ site.title | escape }}</title>
+    <meta name="description" content="{{ page.title | escape }}">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="home-link" href="/">Alex R</a>
+    </header>
+
+    <main>
+      <article class="note">
+        <header class="note-header">
+          <time datetime="{{ page.date | date: '%Y-%m-%d' }}">{{ page.date | date: '%B %Y' }}</time>
+          <h1>{{ page.title | escape }}</h1>
+        </header>
+
+        {{ content }}
+      </article>
+    </main>
+  </body>
+</html>
