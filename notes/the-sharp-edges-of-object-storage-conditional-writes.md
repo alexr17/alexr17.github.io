@@ -118,6 +118,8 @@ I would use conditional writes again. The key is treating them as part of the pr
 
 The biggest thing I learned is that object storage behavior is hard to understand from API docs and small benchmarks alone. You have to run the system for a while. Not just a unit test, not just a tight benchmark loop, but something long-lived enough to see retries, throttling, lost responses, slow requests, provider maintenance, and the occasional missing nine. That is when the actual contract starts to show up.
 
+The public Trino issue trail is a good example. In [trinodb/trino#27400](https://github.com/trinodb/trino/issues/27400), a write using S3 exclusive create could reach S3, lose the response, get retried by the AWS SDK, and then surface as `FileAlreadyExistsException`. The related [fix PR](https://github.com/trinodb/trino/pull/27330) called out Hive, Delta, Iceberg, and Hudi connectors in the release-note path. That is the kind of behavior you do not learn much from a benchmark. You learn it by running real code against real object storage long enough for the weird cases to happen.
+
 That does not replace careful design. Retries still belong at the protocol layer, not hidden inside a generic SDK client. Key layout still matters. A single hot object is easy to reason about, but it is also a bottleneck and may run straight into provider limits. Compatibility testing has to cover the behavioral contract, not just the happy-path API call: retries, error codes, multipart uploads, throttling, and conditional reads.
 
 The happy path for conditional writes is beautiful: read a version, write if the version still matches, and let the object store serialize the race. That is a powerful tool. The unhappy paths are where the system is actually designed.
