@@ -122,7 +122,7 @@ The public Trino issue trail is a good example. Trino added S3 exclusive create,
 
 That does not replace careful design. Retries still belong at the protocol layer, not hidden inside a generic SDK client. Key layout still matters. A single hot object is easy to reason about, but it is also a bottleneck and may run straight into provider limits. Compatibility testing has to cover the behavioral contract, not just the happy-path API call: retries, error codes, multipart uploads, throttling, and conditional reads.
 
-The happy path for conditional writes is beautiful: read a version, write if the version still matches, and let the object store serialize the race. That is a powerful tool. The unhappy paths are where the system is actually designed.
+**The happy path for conditional writes is beautiful:** read a version, write if the version still matches, and let the object store serialize the race. That is a powerful tool. The unhappy paths are where the system is actually designed.
 
 Object storage has a few extremely useful primitives, and they can replace a surprising amount of infrastructure when the workload fits. Those primitives are sharp. The way to get comfortable with the sharp edges is to design for them, then put the design under sustained load and see what the object store actually does.
 
