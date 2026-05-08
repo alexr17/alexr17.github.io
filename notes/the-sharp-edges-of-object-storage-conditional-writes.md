@@ -24,9 +24,9 @@ That is enough to build useful coordination protocols:
 - only one process updates a lock file from the version it observed
 - a reader can cheaply ask whether cached data is still current
 
-Object storage has stopped being "a place to put blobs" and started becoming a place where you can create small, durable ordering facts.
+That small set of operations has started showing up in a bunch of systems that want coordination without running a separate coordination service.
 
-## Other Places This Shows Up
+## Recent Examples
 
 turbopuffer has talked publicly about S3 conditional writes being important to its architecture. Their [first-principles object-storage database discussion](https://turbopuffer.com/blog/podcast-database-from-first-principles) gets at the same underlying problem: when multiple writers append to a WAL on object storage, how do you make sure exactly one writer claims the next durable slot?
 
@@ -44,19 +44,19 @@ s3://bucket/table/.hoodie/.locks/table_lock.json
 
 The file stored a lock owner, an expiration time, and whether the lock had been explicitly released. Acquisition created or overwrote the file with a conditional write. Renewal extended the expiration with another conditional write. Release marked the file as expired instead of deleting it, because conditional delete was not portable enough for the design.
 
-That design removed a real operational dependency. Hudi users already needed permission to write table metadata to object storage. If the lock could live next to the table metadata, they did not need a separate coordination system just to make concurrent commits work.
+That design felt clean. Hudi users already needed permission to write table metadata to object storage. If the lock could live next to the table metadata, they did not need a separate coordination system just to make concurrent commits work.
 
-But none of this made object storage a consensus system. It gave us one atomic operation. The rest of the protocol still had to be engineered.
+On the happy path, it was easy to explain and cheap to run. A commit needed one read of the lock file, one conditional write to acquire it, renewals while the commit was in progress, and one conditional write to release it. The whole thing was a small number of object-storage interactions around the real table write.
 
 ## The Atomic Write Is Not The Whole Protocol
 
-Martin Kleppmann's [How to do distributed locking](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html) is still the right thing to keep in your head when building anything like this. First ask whether the lock protects efficiency or correctness. If two workers do the same background job, maybe you waste money. If two writers corrupt a table, you have a correctness bug.
+The harder part was everything around that one write. The implementation still had to define what happened when a lease expired, a writer stalled, or an object-store request returned an ambiguous result.
 
-In storage systems, this is almost always in the correctness bucket. Performance matters, but only after the protocol can prove it will not corrupt state. For Hudi, a slower commit path would have been annoying. A fast commit path that occasionally let two writers believe they both owned the table would have been unusable.
+Martin Kleppmann's [How to do distributed locking](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html) frames this as the difference between locks used "for efficiency or for correctness." If two workers do the same background job, maybe you waste money. If two writers corrupt a table, you have a correctness bug. In storage systems, correctness almost always comes before performance; performance matters, but only after the protocol can prove it will not corrupt state.
 
 Leases are especially tricky. A process can acquire a lock, pause for longer than the lease (stop-the-world), and then resume after another process has acquired the next lock. The stale process may still believe it is allowed to write. A lock service alone does not fix that. The protected resource needs a way to reject stale work, commonly with fencing tokens or with another conflict-detection mechanism.
 
-In other words, the conditional write was just one piece of the Hudi concurrency story.
+We did not add fencing tokens because fencing would have required the Hudi commit path itself to enforce them. The lock provider alone could not make stale writes impossible; it could only coordinate admission and help writers notice when they had lost the lock. In practice, the storage lock fit into Hudi's existing optimistic concurrency flow, where stale or conflicted commits were expected to abandon rather than be accepted blindly.
 
 ## The Retry Issue
 
@@ -64,19 +64,17 @@ One subtle issue with this design is that ordinary SDK retries can change the me
 
 1. A client sends `PutObject` with `If-None-Match: *`.
 2. The request reaches S3 and creates the object.
-3. The response never makes it back to the client.
-4. The SDK retries the request.
+3. The response never makes it back to the client, perhaps due to a network issue.
+4. The SDK sees a `500` and retries the request.
 5. The retry reaches S3, sees the object already exists, and returns `412 Precondition Failed`.
-
-It is also worth noting that when this happens, the retry is often just the visible symptom. The underlying issue may be a network blip, a lost response, or S3 briefly failing to live up to one of its many nines.
 
 From the protocol's point of view, `412` usually means "someone else won the race." In this case, the client may have won the race itself. Every component behaved reasonably; there is a semantic gap between transport-level retry and protocol-level state.
 
 For a lock service, that ambiguity has to be handled. During acquisition, a retry-induced `412` can look like a lost race. During renewal, a `412` often has to mean "you may no longer own this lock," because assuming otherwise is dangerous.
 
-The Hudi fix was to disable retries in the storage lock clients, captured in [apache/hudi#17869](https://github.com/apache/hudi/pull/17869). A generic SDK retry can repeat the request, but it cannot know whether the original write acquired, renewed, or lost the lock, so Hudi kept retries at the lock-renewal layer instead. That was the right direction, but it was not free.
+The Hudi fix was to disable retries in the storage lock clients, captured in [apache/hudi#17869](https://github.com/apache/hudi/pull/17869). A generic SDK retry can repeat the request, but it cannot know whether the original write acquired, renewed, or lost the lock. Keeping retries at the lock-renewal layer made the behavior easier to reason about: a `412` could no longer be caused by the client's own hidden retry.
 
-Turning off lower-level retries meant that more transient object-store failures reached the lock code paths directly. It also made provider limits harder to ignore. GCS documents a maximum write rate of [one write per second to the same object name](https://cloud.google.com/storage/quotas), which matters a lot for single-object designs. A lock file is intentionally a hot object. That is the whole point. But object stores are usually optimized for high aggregate throughput across keys, not rapid mutation of one key.
+Once lower-level retries were disabled, transient object-store failures surfaced directly in the lock code. One of those failures was specific to GCS: acquiring and releasing the same lock object in under a second could return `429`, because GCS documents a maximum write rate of [one write per second to the same object name](https://cloud.google.com/storage/quotas). With a single lock file, you can hit that limit even when the table itself is nowhere near an object-store throughput ceiling.
 
 ## Recovering From Ambiguous Writes
 
@@ -90,6 +88,8 @@ Now this "simple" lock protocol has gotten very complex. It needs an explicit am
 
 The GCS one-write-per-second limit is not just a Hudi anecdote. turbopuffer's post on [building a distributed queue in a single JSON file on object storage](https://turbopuffer.com/blog/object-storage-queue) hits the same shape of problem from another angle: a single `queue.json` file with compare-and-set writes is simple and correct, but every queue operation mutates the same object. Once GCS forces the design toward batching and brokered writes, that can become the contract for Azure and S3 too, unless you want separate protocols per provider.
 
+The same retry question has shown up outside S3 too, but not in a way where you can assume the behavior is identical. In a [Trino issue about intermittent Iceberg commit failures on Azure storage](https://github.com/trinodb/trino/issues/25931#issuecomment-3638416609), a maintainer pointed out that Trino's Azure filesystem also uses `if-none-match: *` for exclusive writes, while the Azure SDK has its own retry layer. That looks similar to the S3 retry problem at the protocol level, but the exact retry behavior, error surface, and configuration knobs belong to the Azure SDK, not the AWS SDK.
+
 It is not enough to ask whether S3, GCS, and Azure all have some version of conditional writes. The important questions are more specific:
 
 - How fast can I mutate the same object?
@@ -97,25 +97,23 @@ It is not enough to ask whether S3, GCS, and Azure all have some version of cond
 - Are retries automatic, and can I turn them off for this path?
 - Does the S3-compatible provider actually implement the exact S3 feature I need?
 
-DigitalOcean Spaces was a concrete example. It is S3-compatible, but that does not mean every S3 concurrency primitive is there. Its docs list conditional headers for reads like `GetObject` and `HeadObject`, but not the `PutObject` behavior this lock protocol needed. AWS S3 support did not automatically imply Spaces support.
+DigitalOcean Spaces (ceph-based) was a concrete example. It is S3-compatible, but that does not mean every S3 concurrency primitive is there. Its docs list conditional headers for reads like `GetObject` and `HeadObject`, but not the `PutObject` behavior this lock protocol needed. AWS S3 support did not automatically imply Spaces support.
 
-This is a tricky part of multi-cloud support with all these S3-compatible object stores on the rise. They all do things slightly differently and you have to support a specific set of operations, retry behaviors, limits, and error cases for each provider.
+This is a tricky part of multi-cloud support especially with these S3-compatible object stores on the rise. They all do things slightly differently and you have to support a specific set of operations, retry behaviors, limits, and error cases for each provider.
 
 > **Aside: read latency varies a lot by provider too.**
-> Simon Eskildsen from turbopuffer [shared a benchmark](https://x.com/Sirupsen/status/2050895383866249618) of `GET` with `If-None-Match` across object stores. The operation is useful for cache validation: if a query node has a cached view of the WAL, a `304 Not Modified` means it can keep using that cache without downloading the object again.
+> Simon Eskildsen [shared a benchmark](https://x.com/Sirupsen/status/2050895383866249618) of `GET` with `If-None-Match` across object stores. The operation is useful for cache validation: if a query node has a cached view of the WAL, a `304 Not Modified` means it can keep using that cache without downloading the object again.
 >
-> The interesting part is how differently the stores performed on the same conditional read. This is a different use case than locks, but it reinforces the same lesson: once object storage is on a hot path, provider behavior is part of the system design. We put a lot of this kind of provider-specific behavior into our original research for the lock provider.
+> The interesting part is how differently the stores performed on the same conditional read. This is a different use case than locks, but same as with my lock service: once object storage is on a hot path, provider behavior is part of the system design.
 
-## What I learned
+## My reflections
 
-I will build things with conditional writes again. The key is treating them as part of the protocol, not as a storage API trick.
+This was a fascinating and interesting experience; I will certainly build things with conditional writes again. 
 
-The biggest thing I learned is that there are a lot of nuances beyond the API spec, and those nuances matter when you build distributed primitives on top. You have to run the system for a while. Not just a unit test, not just a tight benchmark loop, but something long-lived enough to see retries, throttling, lost responses, slow requests, provider maintenance, and the occasional missing nine. That is when the actual contract starts to show up.
+One of my biggest takeaways is that there are a lot of nuances beyond the API spec, and those nuances matter when you build critical distributed primitives on top. You have to run the system for a while. Not just a unit test, not just a tight benchmark loop, but something long-lived enough to see retries, throttling, lost responses, slow requests, provider maintenance, and the occasional missing nine. That is when the actual contract starts to show up (or breaks!).
 
-That does not replace careful design. Retries still belong at the protocol layer, not hidden inside a generic SDK client. Key layout still matters. A single hot object is easy to reason about, but it is also a bottleneck and may run straight into provider limits. Compatibility testing has to cover the behavioral contract, not just the happy-path API call: retries, error codes, multipart uploads, throttling, and conditional reads.
+That does not replace careful design. TLA+ is something I wish I had spent more time on. Retries belong at the protocol layer, not hidden inside a generic SDK client. Key layout still matters. A single hot object is easy to reason about, but it is also a bottleneck and may run straight into provider limits.
 
-**The happy path for conditional writes is beautiful:** read a version, write if the version still matches, and let the object store serialize the race. That is a powerful tool. The unhappy paths are where the system is actually designed.
+Yet **the happy path for conditional writes is beautiful:** read a version, write if the version still matches, and let the object store serialize the race.
 
-Object storage has a few extremely useful primitives, and they can replace a surprising amount of infrastructure when the workload fits. Those primitives are sharp. The way to get comfortable with the sharp edges is to design for them, then put the design under sustained load and see what the object store actually does.
-
-I am excited to see what people build with conditional requests on object storage over the next few years. Locks, queues, WALs, cache validation, and state files are probably just the obvious first wave. As more systems are designed around object storage as the durable substrate, these small request preconditions will likely show up in places that currently depend on a separate coordination layer.
+I am excited to see what people build with conditional requests on object storage over the next few years. Locks, queues, WALs, cache validation, and state files are probably just the obvious first wave. As more systems are designed around object storage as the durable substrate, these small request preconditions will likely become a bigger piece of the conversation around S3 and object storage.
