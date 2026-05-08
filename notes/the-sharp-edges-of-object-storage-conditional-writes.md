@@ -114,7 +114,7 @@ They also make provider differences extremely visible. Simon shared a benchmark 
 
 ## What I learned
 
-I would use conditional writes again. The key is treating them as part of the protocol, not as a storage API trick.
+I will build things with conditional writes again. The key is treating them as part of the protocol, not as a storage API trick.
 
 The biggest thing I learned is that object storage behavior is hard to understand from API docs and small benchmarks alone. You have to run the system for a while. Not just a unit test, not just a tight benchmark loop, but something long-lived enough to see retries, throttling, lost responses, slow requests, provider maintenance, and the occasional missing nine. That is when the actual contract starts to show up.
 
