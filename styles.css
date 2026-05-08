@@ -37,6 +37,10 @@ body {
   line-height: 1.5;
 }
 
+body:has(.parallel-sections) {
+  max-width: 840px;
+}
+
 a {
   color: var(--link);
   text-underline-offset: 0.14em;
