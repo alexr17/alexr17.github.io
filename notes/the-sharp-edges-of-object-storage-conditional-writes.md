@@ -6,13 +6,11 @@ date: 2026-04-01
 
 When I was working at Onehouse, I implemented a distributed locking service for Apache Hudi's optimistic concurrency control using conditional writes in object storage.
 
-The idea was simple enough to fit in one sentence: instead of requiring a separate lock service like ZooKeeper or DynamoDB, use the atomic write preconditions already available in cloud object stores. I wrote the original Hudi design up in [RFC-91: Storage-based lock provider using conditional writes](https://github.com/apache/hudi/blob/master/rfc/rfc-91/rfc-91.md). The RFC is the dry version. This is the version about why the primitive is so useful, and why it is much easier to get wrong than it looks.
+I started the project about two months into Onehouse, after mostly building backend APIs for MySQL at Microsoft. I had barely worked with S3 before. The idea sounded simple: instead of requiring a separate lock service like ZooKeeper or DynamoDB, use the atomic write preconditions already available in cloud object stores.
 
-Conditional writes are a great distributed systems primitive. They are not a lock service by themselves.
+I wrote the original Hudi design up in [RFC-91: Storage-based lock provider using conditional writes](https://github.com/apache/hudi/blob/master/rfc/rfc-91/rfc-91.md). The RFC is the dry version. This is the version about what I learned about S3, GCS, conditional writes, and the awkward places where a small storage API turns into distributed-systems work.
 
-That distinction matters. Once retries, leases, cache freshness, provider throttling, and S3-compatible-but-not-quite-S3 APIs enter the picture, the hard part is not "does my object store support this header?" The hard part is understanding the exact protocol contract you are building on top of that header. For experienced distributed-systems engineers, this may all look familiar. For me, it was new terrain. I started this project two months into Onehouse, after mostly building backend APIs for MySQL at Microsoft, with barely any S3 experience.
-
-## The Tiny API That Changes The Design Space
+## The Tiny API
 
 The core primitive is compare-and-set for object storage.
 
@@ -26,11 +24,15 @@ That is enough to build useful coordination protocols:
 - only one process updates a lock file from the version it observed
 - a reader can cheaply ask whether cached data is still current
 
-You can see the same pattern showing up elsewhere. turbopuffer has talked publicly about S3 conditional writes being important to its architecture, and their [first-principles object-storage database discussion](https://turbopuffer.com/blog/podcast-database-from-first-principles) gets at the same underlying problem: when multiple writers append to a WAL on object storage, how do you make sure exactly one writer claims the next durable slot? Terraform is another good example. In Terraform 1.10, the S3 backend added optional native state locking with a lock file written using `If-None-Match`, removing the need for DynamoDB in that path. Bruno Schaatsbergen's writeup on [S3 native state locking](https://www.bschaatsbergen.com/s3-native-state-locking) shows the same tradeoff from a very different ecosystem: the primitive removes infrastructure, but the implementation still has to care about migration paths, bucket policies, SDK defaults, S3 Object Lock, and best-effort support for S3-compatible providers.
+Object storage has stopped being "a place to put blobs" and started becoming a place where you can create small, durable ordering facts.
+
+## Other Places This Shows Up
+
+turbopuffer has talked publicly about S3 conditional writes being important to its architecture. Their [first-principles object-storage database discussion](https://turbopuffer.com/blog/podcast-database-from-first-principles) gets at the same underlying problem: when multiple writers append to a WAL on object storage, how do you make sure exactly one writer claims the next durable slot?
+
+Terraform is another good example. In Terraform 1.10, the S3 backend added optional native state locking with a lock file written using `If-None-Match`, removing the need for DynamoDB in that path. Bruno Schaatsbergen's writeup on [S3 native state locking](https://www.bschaatsbergen.com/s3-native-state-locking) shows the same tradeoff from a very different ecosystem: the primitive removes infrastructure, but the implementation still has to care about migration paths, bucket policies, SDK defaults, S3 Object Lock, and best-effort support for S3-compatible providers.
 
 Gunnar Morling's excellent post on [leader election with S3 conditional writes](https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/), where each leadership epoch is represented by a new lock object, inspired the storage based lock provider I built for Hudi. The corresponding [Hacker News thread](https://news.ycombinator.com/item?id=41357123) is worth reading too, mostly because distributed-systems purists immediately show up to point out the lease and fencing caveats. They are not wrong.
-
-Object storage has stopped being "a place to put blobs" and started becoming a place where you can create small, durable ordering facts.
 
 ## The Hudi Lock
 
@@ -84,41 +86,31 @@ If a client does not know whether a conditional write succeeded, it has to re-en
 
 Now this "simple" lock protocol has gotten very complex. It needs an explicit ambiguous-write recovery path, separate rules for acquisition and renewal, and some way to avoid read-then-act races. Large-scale systems absorb that complexity with patterns like append-only WAL slots, brokers, group commit, or fencing tokens. Those are useful patterns, but they are also a sign that the one-file lock must become a real distributed protocol.
 
-## Shared protocol for multi-cloud
+## Same Primitive, Different Object Stores
 
-The GCS one-write-per-second limit is not just a Hudi anecdote. turbopuffer's post on [building a distributed queue in a single JSON file on object storage](https://turbopuffer.com/blog/object-storage-queue) hits the same shape of problem from another angle.
-
-Their simplest queue is one `queue.json` file. Pushers and workers read the file, modify it, and write it back with compare-and-set. It is a clean design: one durable file, strong consistency, no separate coordination service. It also has an obvious ceiling. If every queue operation mutates the same object, the system is bounded by object rewrite latency and provider limits. On GCS, the single-object write limit forces the design toward batching and brokered writes; they likely use the same protocol for Azure and S3 as well.
+The GCS one-write-per-second limit is not just a Hudi anecdote. turbopuffer's post on [building a distributed queue in a single JSON file on object storage](https://turbopuffer.com/blog/object-storage-queue) hits the same shape of problem from another angle: a single `queue.json` file with compare-and-set writes is simple and correct, but every queue operation mutates the same object. Once GCS forces the design toward batching and brokered writes, that can become the contract for Azure and S3 too, unless you want separate protocols per provider.
 
 It is not enough to ask whether S3, GCS, and Azure all have some version of conditional writes. The important questions are more specific:
 
 - How fast can I mutate the same object?
 - Are failed conditional writes billed or throttled differently?
 - Are retries automatic, and can I turn them off for this path?
-- Is the condition checked on `PutObject`, multipart completion, copy, metadata update, or only reads?
 - Does the S3-compatible provider actually implement the exact S3 feature I need?
 
-That last point came up with DigitalOcean Spaces. Spaces is S3-compatible, but "S3-compatible" does not mean "supports every S3 concurrency primitive." In the compatibility docs, conditional headers are listed for reads like `GetObject` and `HeadObject`, while the `PutObject` header list does not expose the create-if-absent/write-if-version behavior this kind of lock protocol needs. A design that works on AWS S3 with the AWS SDK may not work on every S3-compatible object store, and the only real answer is to test the exact operation against each provider.
+DigitalOcean Spaces was a concrete example. It is S3-compatible, but that does not mean every S3 concurrency primitive is there. Its docs list conditional headers for reads like `GetObject` and `HeadObject`, but not the `PutObject` behavior this lock protocol needed. AWS S3 support did not automatically imply Spaces support.
 
 This is a tricky part of multi-cloud support with all these S3-compatible object stores on the rise. They all do things slightly differently and you have to support a specific set of operations, retry behaviors, limits, and error cases for each provider.
 
-## Conditional Reads Matter Too
-
-There is a read-side version of this story.
-
-Simon Eskildsen from turbopuffer [pointed out](https://x.com/Sirupsen/status/2050895383866249618) that `GET` with `If-None-Match` is important for building fast databases on object storage. If a query node has a cached view of the WAL, it can ask the object store whether the relevant object has changed. A `304 Not Modified` means the cache is still fresh without downloading the object again.
-
-That is a small feature with large architectural consequences. Conditional writes help establish ordering or ownership facts. Conditional reads help validate cached state cheaply. In an object-storage database, both can sit on hot paths.
-
-They also make provider differences extremely visible. Simon shared a benchmark of `GET 304` latency across providers where Azure looked surprisingly strong among the big three. The exact numbers are less important than the shape of the lesson: once object storage is in the read path of a database, tail latency of conditional reads becomes a database concern, not a storage trivia question.
+> **Aside: read latency varies a lot by provider too.**
+> Simon Eskildsen from turbopuffer [shared a benchmark](https://x.com/Sirupsen/status/2050895383866249618) of `GET` with `If-None-Match` across object stores. The operation is useful for cache validation: if a query node has a cached view of the WAL, a `304 Not Modified` means it can keep using that cache without downloading the object again.
+>
+> The interesting part is how differently the stores performed on the same conditional read. This is a different use case than locks, but it reinforces the same lesson: once object storage is on a hot path, provider behavior is part of the system design. We put a lot of this kind of provider-specific behavior into our original research for the lock provider.
 
 ## What I learned
 
 I will build things with conditional writes again. The key is treating them as part of the protocol, not as a storage API trick.
 
-The biggest thing I learned is that object storage behavior is hard to understand from API docs and small benchmarks alone. You have to run the system for a while. Not just a unit test, not just a tight benchmark loop, but something long-lived enough to see retries, throttling, lost responses, slow requests, provider maintenance, and the occasional missing nine. That is when the actual contract starts to show up.
-
-The public Trino issue trail is a good example. Trino added S3 exclusive create, and the hardening came later: [trinodb/trino#27400](https://github.com/trinodb/trino/issues/27400) documented how a write could succeed on S3, lose the response, get retried by the AWS SDK, and then surface as `FileAlreadyExistsException`. That is the kind of behavior you find by running real code against real object storage long enough for the weird cases to happen.
+The biggest thing I learned is that there are a lot of nuances beyond the API spec, and those nuances matter when you build distributed primitives on top. You have to run the system for a while. Not just a unit test, not just a tight benchmark loop, but something long-lived enough to see retries, throttling, lost responses, slow requests, provider maintenance, and the occasional missing nine. That is when the actual contract starts to show up.
 
 That does not replace careful design. Retries still belong at the protocol layer, not hidden inside a generic SDK client. Key layout still matters. A single hot object is easy to reason about, but it is also a bottleneck and may run straight into provider limits. Compatibility testing has to cover the behavioral contract, not just the happy-path API call: retries, error codes, multipart uploads, throttling, and conditional reads.
 
