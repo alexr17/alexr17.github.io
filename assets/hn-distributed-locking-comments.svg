@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="352" viewBox="0 0 2048 352" role="img" aria-labelledby="title desc">
+  <title id="title">Hacker News comments about distributed locking</title>
+  <desc id="desc">A screenshot-style rendering of Hacker News comments debating distributed locking, leasing, and idempotency.</desc>
+  <rect width="2048" height="352" fill="#f6f6ef"/>
+  <foreignObject x="0" y="0" width="2048" height="352">
+    <div xmlns="http://www.w3.org/1999/xhtml">
+      <style>
+        .hn {
+          box-sizing: border-box;
+          width: 2048px;
+          height: 352px;
+          padding: 8px 10px;
+          background: #f6f6ef;
+          color: #000;
+          font: 22px/1.25 Verdana, Geneva, sans-serif;
+        }
+        .meta {
+          color: #828282;
+          font-size: 18px;
+          font-weight: 700;
+          margin-bottom: 8px;
+        }
+        .comment {
+          margin: 0 0 14px 26px;
+        }
+        .reply {
+          margin-left: 66px;
+          margin-top: 26px;
+        }
+      </style>
+      <div class="hn">
+        <div class="meta">&#9650; Spivak on Aug 30, 2024 | prev | next [&#8211;]</div>
+        <p class="comment">Why are people going for this guys throat&#8212; distributed locking might be impossible but what is being described, distributed leasing, is totally possible and useful. There's no sins being committed here.</p>
+        <p class="comment">I might choose DynamoDB over S3 to implement this but both are fine.</p>
+
+        <div class="reply">
+          <div class="meta">&#9650; otterley on Aug 30, 2024 | parent | next [&#8211;]</div>
+          <p class="comment">HN being HN, I guess. Nerds like to nitpick.</p>
+          <p class="comment">That said, if you have a choice between implementing idempotency and using a distributed lock, you should always opt for the former. It&#8217;s far less complex and less error prone.</p>
+        </div>
+
+        <div class="reply" style="margin-top: 28px;">
+          <div class="meta">&#9650; mprime1 on Sept 1, 2024 | parent | prev | next [&#8211;]</div>
+          <p class="comment">Telling people "here's a recipe to do locks" should come with a giant flashing sign that say: "this is not an actual lock (as in in-process locks) -- locks in distributed systems are impossible, this cannot be used as a recipe for mutual exclusion"</p>
+        </div>
+      </div>
+    </div>
+  </foreignObject>
+</svg>

@@ -1,6 +1,6 @@
 ---
 layout: note
-title: "What I Learned about Building Distributed Locks on S3 and GCS"
+title: "Building Distributed Locking on S3 and GCS"
 date: 2026-04-01
 ---
 
@@ -8,13 +8,13 @@ When I was working at Onehouse, I implemented a distributed locking service for 
 
 I started the project about two months into Onehouse, after mostly building backend APIs for MySQL at Microsoft. I had barely worked with S3 before. The idea sounded simple: instead of requiring a separate lock service like ZooKeeper or DynamoDB, use the atomic write preconditions already available in cloud object stores.
 
-I wrote the original Hudi design up in [RFC-91: Storage-based lock provider using conditional writes](https://github.com/apache/hudi/blob/master/rfc/rfc-91/rfc-91.md). The RFC is the dry version. This is the version about what I learned about S3, GCS, conditional writes, and the awkward places where a small storage API turns into distributed-systems work.
+I wrote the original Hudi design up in [RFC-91: Storage-based lock provider using conditional writes](https://github.com/apache/hudi/blob/master/rfc/rfc-91/rfc-91.md). The RFC is dry. This is the version about what I learned about S3, GCS, conditional writes, and the awkward places where a small storage API turns into distributed-systems work.
 
 ## The Tiny API
 
 The core primitive is compare-and-set for object storage.
 
-For a long time, S3 was the awkward missing piece here. GCS and Azure had supported object preconditions for years, but S3 did not support the create-if-absent write path that many of these designs want. That changed in August 2024, when [S3 added conditional writes for `PutObject` and `CompleteMultipartUpload`](https://aws.amazon.com/about-aws/whats-new/2024/08/amazon-s3-conditional-writes/).
+For a long time, S3 was the awkward missing piece here. GCS and Azure had long supported object preconditions for years, but S3 did not support the create-if-absent write path that this design requires. That changed in August 2024, when [S3 added conditional writes for `PutObject` and `CompleteMultipartUpload`](https://aws.amazon.com/about-aws/whats-new/2024/08/amazon-s3-conditional-writes/).
 
 On S3, `If-None-Match: *` says "create this object only if it does not already exist." `If-Match` says "overwrite this object only if its current ETag is the one I observed." GCS exposes the same idea through generation preconditions, including `if_generation_match=0` for create-if-absent. Azure Blob Storage has its own version of conditional request headers.
 
@@ -24,15 +24,20 @@ That is enough to build useful coordination protocols:
 - only one process updates a lock file from the version it observed
 - a reader can cheaply ask whether cached data is still current
 
-That small set of operations has started showing up in a bunch of systems that want coordination without running a separate coordination service.
+This small set of operations has started showing up in a bunch of systems that want coordination without running a separate coordination service like Redis, Dynamo, or Zookeeper.
 
 ## Recent Examples
 
 turbopuffer has talked publicly about S3 conditional writes being important to its architecture. Their [first-principles object-storage database discussion](https://turbopuffer.com/blog/podcast-database-from-first-principles) gets at the same underlying problem: when multiple writers append to a WAL on object storage, how do you make sure exactly one writer claims the next durable slot?
 
-Terraform is another good example. In Terraform 1.10, the S3 backend added optional native state locking with a lock file written using `If-None-Match`, removing the need for DynamoDB in that path. Bruno Schaatsbergen's writeup on [S3 native state locking](https://www.bschaatsbergen.com/s3-native-state-locking) shows the same tradeoff from a very different ecosystem: the primitive removes infrastructure, but the implementation still has to care about migration paths, bucket policies, SDK defaults, S3 Object Lock, and best-effort support for S3-compatible providers.
+Terraform is another production example. In Terraform 1.10, the S3 backend added optional native state locking with a lock file written using `If-None-Match`, removing the need for DynamoDB in that path. Bruno Schaatsbergen's writeup on [S3 native state locking](https://www.bschaatsbergen.com/s3-native-state-locking) goes into detail on things the implementation still has to care about migration paths, bucket policies, SDK defaults, and best-effort support for S3-compatible providers. I believe Terraform's roadmap has plans to make this lock default on S3 and completely remove the need for Dynamo.
 
-Gunnar Morling's excellent post on [leader election with S3 conditional writes](https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/), where each leadership epoch is represented by a new lock object, inspired the storage based lock provider I built for Hudi. The corresponding [Hacker News thread](https://news.ycombinator.com/item?id=41357123) is worth reading too, mostly because distributed-systems purists immediately show up to point out the lease and fencing caveats. They are not wrong.
+Finally, Gunnar Morling's excellent post on [leader election with S3 conditional writes](https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/), where each leadership epoch is represented by a new lock object, inspired the storage based lock provider I built for Hudi. The corresponding [Hacker News thread](https://news.ycombinator.com/item?id=41357123) is full of distributed-systems purists debating the premise of distributing locking entirely. If you subscribe to this camp, the rest of this story may be not be for you :)
+
+<figure class="note-figure">
+  <img src="/assets/hn-distributed-locking-comments.svg" alt="Hacker News comments debating whether S3 conditional writes are distributed locking, distributed leasing, or too easy to misuse.">
+  <figcaption>A few comments from the Hacker News thread on Gunnar Morling's post.</figcaption>
+</figure>
 
 ## The Hudi Lock
 
