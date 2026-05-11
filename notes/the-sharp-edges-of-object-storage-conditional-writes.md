@@ -55,17 +55,17 @@ On the happy path, it was easy to explain and cheap to run. A commit needed one 
 
 ## The Atomic Write Is Not The Whole Protocol
 
-The harder part was everything around that one write. The implementation still had to define what happened when a lease expired, a writer stalled, or an object-store request returned an ambiguous result.
+The hard part is everything around that one write. The implementation still had to define what happened when a lease expired, a writer stalled, or an object-store request returned an ambiguous result.
 
-Martin Kleppmann's [How to do distributed locking](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html) frames this as the difference between locks used "for efficiency or for correctness." If two workers do the same background job, maybe you waste money. If two writers corrupt a table, you have a correctness bug. In storage systems, correctness almost always comes before performance; performance matters, but only after the protocol can prove it will not corrupt state.
+Martin Kleppmann's [How to do distributed locking](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html) frames this as the difference between locks used "for efficiency or for correctness." If two workers do the same background job, maybe you waste money. If two writers corrupt a table, you have a correctness bug. In storage systems, correctness almost always comes before performance.
 
-Leases are especially tricky. A process can acquire a lock, pause for longer than the lease (stop-the-world), and then resume after another process has acquired the next lock. The stale process may still believe it is allowed to write. A lock service alone does not fix that. The protected resource needs a way to reject stale work, commonly with fencing tokens or with another conflict-detection mechanism.
+Leases are especially tricky. A process can acquire a lock, pause for longer than the lease (stop-the-world), and then resume after another process has acquired the next lock. The stale process may still believe it is allowed to write. The protected resource needs a way to reject stale work, commonly with fencing tokens or with another conflict-detection mechanism.
 
-We did not add fencing tokens because fencing would have required the Hudi commit path itself to enforce them. The lock provider alone could not make stale writes impossible; it could only coordinate admission and help writers notice when they had lost the lock. In practice, the storage lock fit into Hudi's existing optimistic concurrency flow, where stale or conflicted commits were expected to abandon rather than be accepted blindly.
+We did not add fencing tokens because it would have required the Hudi commit path itself to enforce them. The lock provider alone could not make stale writes impossible; it could only coordinate admission and tell writers to abandon/abort when they had lost the lock. This allowed the storage lock to fit into Hudi's existing optimistic concurrency contract.
 
 ## The Retry Issue
 
-One subtle issue with this design is that ordinary SDK retries can change the meaning of a conditional-write failure. The failure mode is now described clearly in [AWS SDK Java v2 issue #6580](https://github.com/aws/aws-sdk-java-v2/issues/6580):
+One subtle issue with this simple lock design is that ordinary SDK retries can change the meaning of a conditional-write failure. The failure mode was not apparent early on, but is now described clearly in [AWS SDK Java v2 issue #6580](https://github.com/aws/aws-sdk-java-v2/issues/6580):
 
 1. A client sends `PutObject` with `If-None-Match: *`.
 2. The request reaches S3 and creates the object.
@@ -77,13 +77,13 @@ From the protocol's point of view, `412` usually means "someone else won the rac
 
 For a lock service, that ambiguity has to be handled. During acquisition, a retry-induced `412` can look like a lost race. During renewal, a `412` often has to mean "you may no longer own this lock," because assuming otherwise is dangerous.
 
-The Hudi fix was to disable retries in the storage lock clients, captured in [apache/hudi#17869](https://github.com/apache/hudi/pull/17869). A generic SDK retry can repeat the request, but it cannot know whether the original write acquired, renewed, or lost the lock. Keeping retries at the lock-renewal layer made the behavior easier to reason about: a `412` could no longer be caused by the client's own hidden retry.
+The tradeoff we took was to disable retries in the storage lock clients: [apache/hudi#17869](https://github.com/apache/hudi/pull/17869). This did mean that the lock service needed its own SDK client. Keeping retries at the lock protocol layer made the behavior easier to reason about: a `412` could no longer be caused by the client's own hidden retry.
 
-Once lower-level retries were disabled, transient object-store failures surfaced directly in the lock code. One of those failures was specific to GCS: acquiring and releasing the same lock object in under a second could return `429`, because GCS documents a maximum write rate of [one write per second to the same object name](https://cloud.google.com/storage/quotas). With a single lock file, you can hit that limit even when the table itself is nowhere near an object-store throughput ceiling.
+However once lower-level retries were disabled, transient object-store failures surfaced directly in the lock code, leading to higher frequency of 500s and occasionally higher latencies. One of those failures was specific to GCS: acquiring and releasing the same lock object in under a second could return `429`, because GCS documents a maximum write rate of [one write per second to the same object name](https://cloud.google.com/storage/quotas). With a single lock file, you can hit that limit even when the table itself is nowhere near an object-store throughput ceiling.
 
 ## Recovering From Ambiguous Writes
 
-The retry ambiguity is not unique to Hudi's single-lock-file design. Epochs and fencing tokens help with stale owners, and they can make recovery from an ambiguous write more structured, but they do not make a conditional write magically idempotent.
+The retry ambiguity is not unique to Hudi's single-lock-file design. Fencing tokens help with stale owners, and epochs can help identify ownership attempts and ordering. But neither one directly resolves a lost response unless the protocol records enough identity for the client to inspect afterward.
 
 If a client does not know whether a conditional write succeeded, it has to re-enter the protocol. Reading or listing state is not enough by itself (TOCTOU); the client needs another guarded operation, or a downstream fence, before assuming it owns anything.
 
@@ -113,7 +113,7 @@ This is a tricky part of multi-cloud support especially with these S3-compatible
 
 ## My reflections
 
-This was a fascinating and interesting experience; I will certainly build things with conditional writes again. 
+This was a fascinating experience; I will certainly build things with conditional writes again. 
 
 One of my biggest takeaways is that there are a lot of nuances beyond the API spec, and those nuances matter when you build critical distributed primitives on top. You have to run the system for a while. Not just a unit test, not just a tight benchmark loop, but something long-lived enough to see retries, throttling, lost responses, slow requests, provider maintenance, and the occasional missing nine. That is when the actual contract starts to show up (or breaks!).
 
